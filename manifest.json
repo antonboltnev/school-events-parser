@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Calendarify School PDFs and emails",
+  "version": "1.0.0",
+  "description": "Extracts dates and events from school PDFs and adds them to Google Calendar.",
+  "permissions": [
+    "identity",
+    "scripting",
+    "activeTab",
+    "tabs"
+  ],
+  "host_permissions": ["https://*/*", "http://*/*", "https://www.googleapis.com/"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "oauth2": {
+    "client_id": "256462909058-8vtlu6mk89evvb3p4sqd6vh51vbm7g0l.apps.googleusercontent.com",
+    "scopes": ["https://www.googleapis.com/auth/calendar.events"]
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["libs/pdf.worker.min.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
