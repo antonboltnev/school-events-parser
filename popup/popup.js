@@ -69,7 +69,7 @@ async function extractTextFromPdf() {
 
 async function extractEventsAI(text) {
     try {
-        const res = await fetch("http://localhost:3000/parse-events", {
+        const res = await fetch("https://school-events-parser.fly.dev/parse-events", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text })
