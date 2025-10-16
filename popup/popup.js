@@ -51,8 +51,12 @@ function detectRecurrence(dateText) {
 }
 
 // -------------------- PDF Extraction --------------------
-async function extractTextFromPdf() {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+async function extractTextFromPdf(activeTab) {
+    const tab = activeTab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+    if (!tab || !tab.url) {
+        throw new Error("Active tab URL unavailable");
+    }
+
     const response = await fetch(tab.url);
     const buffer = await response.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
@@ -196,8 +200,55 @@ document.addEventListener("DOMContentLoaded", async () => {
     addAllBtn.style.display = 'none';
 
     try {
-        const text = await extractTextFromPdf();
-        const events = await extractEventsAI(text);
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const tabUrl = activeTab?.url || "";
+
+        let isLisPortal = false;
+        try {
+            const { hostname } = new URL(tabUrl);
+            isLisPortal = hostname.includes("engage.lis.school");
+        } catch {
+            isLisPortal = tabUrl.includes("engage.lis.school");
+        }
+
+        if (!isLisPortal) {
+            container.textContent = "Only available on LIS school portal.";
+            return;
+        }
+
+        const cacheKey = `pdfData:${activeTab.id}`;
+        let text;
+        let events;
+        try {
+            const stored = await chrome.storage.session.get(cacheKey);
+            const cachedEntry = stored?.[cacheKey];
+
+            if (cachedEntry) {
+                if (typeof cachedEntry === "string") {
+                    // Legacy format from previous sessions
+                    text = cachedEntry;
+                } else if (cachedEntry.url === tabUrl) {
+                    text = cachedEntry.text;
+                    events = cachedEntry.events;
+                }
+            }
+
+            if (!text) {
+                text = await extractTextFromPdf(activeTab);
+            }
+
+            if (!events) {
+                events = await extractEventsAI(text);
+            }
+
+            await chrome.storage.session.set({
+                [cacheKey]: { url: tabUrl, text, events }
+            });
+        } catch (storageErr) {
+            console.warn("Session storage unavailable, falling back to fresh parse.", storageErr);
+            text = await extractTextFromPdf(activeTab);
+            events = await extractEventsAI(text);
+        }
         container.textContent = "";
 
 

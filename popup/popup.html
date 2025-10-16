@@ -18,12 +18,16 @@
             animation: spin 1s linear infinite;
             margin-left: 5px;
         }
+        .spinner--primary {
+            border-color: #4285F4;
+            border-top-color: transparent;
+        }
         @keyframes spin { 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
 <h3>Detected Events</h3>
-<div id="events">Scanning document...</div>
+<div id="events">Scanning document<span class="spinner spinner--primary" aria-hidden="true"></span></div>
 <button id="add-all" class="btn btn-primary" style="margin: 10px auto 0; padding: 8px 16px; width: 100%">Add All Events</button>
 <script src="../libs/pdf.min.js"></script>
 <script src="popup.js"></script>

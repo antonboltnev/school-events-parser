@@ -5,6 +5,7 @@
   "description": "Extracts dates and events from school PDFs and adds them to Google Calendar.",
   "permissions": [
     "identity",
+    "storage",
     "scripting",
     "activeTab",
     "tabs"
