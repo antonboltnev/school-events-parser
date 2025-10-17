@@ -3,20 +3,30 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("libs/pdf.worker.
 function normalizeDateRange(dateStr) {
     if (!dateStr) return dateStr;
 
-    // 🧹 Remove common prefixes like "Starting", "From", "On"
-    dateStr = dateStr
-        .replace(/^\s*(starting|from|on|beginning|begins|begin)\s+/i, "")
-        .trim();
+    // 🧹 Remove prefixes like "Starting", "From", "On"
+    dateStr = dateStr.replace(/^\s*(starting|from|on|beginning|begins|begin)\s+/i, "");
 
-    // Match ISO-style ranges
+    // Remove ordinal suffixes (1st, 2nd, 3rd, 8th)
+    dateStr = dateStr.replace(/\b(\d{1,2})(st|nd|rd|th)\b/gi, "$1");
+
+    // Handle ranges "2025-10-20 to 2025-10-31"
     const rangeMatch = dateStr.match(
         /\b(\d{4}-\d{1,2}-\d{1,2})\s*(?:to|–|-)\s*(\d{4}-\d{1,2}-\d{1,2})\b/i
     );
     if (rangeMatch) return rangeMatch[1];
 
-    // Match "20 Oct to 31 Oct"
+    // Handle "20 Oct to 31 Oct"
     const altRange = dateStr.match(/\b(\d{1,2}\s+\w+)\s*(?:to|–|-)\s*(\d{1,2}\s+\w+)/i);
     if (altRange) return altRange[1];
+
+    // Try parsing the cleaned string
+    const parsed = new Date(dateStr);
+    if (!isNaN(parsed)) {
+        const yyyy = parsed.getFullYear();
+        const mm = String(parsed.getMonth() + 1).padStart(2, "0");
+        const dd = String(parsed.getDate()).padStart(2, "0");
+        return `${yyyy}-${mm}-${dd}`;
+    }
 
     return dateStr.trim();
 }
@@ -51,12 +61,32 @@ function detectRecurrence(dateText) {
 }
 
 // -------------------- PDF Extraction --------------------
-async function extractTextFromPdf(activeTab) {
+async function extractTextFromPdfOrPortal(activeTab) {
     const tab = activeTab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
     if (!tab || !tab.url) {
         throw new Error("Active tab URL unavailable");
     }
 
+    // 🧩 Try to extract text from .portalModalInner first (injected into the page)
+    try {
+        const [{ result: portalText }] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => {
+                const el = document.querySelector(".portalModalInner");
+                return el ? el.innerText.trim() : null;
+            },
+        });
+
+        if (portalText && portalText.length > 100) { // avoid tiny elements
+            console.log("✅ Extracted text from portal modal.");
+            return portalText;
+        }
+    } catch (err) {
+        console.warn("⚠️ Could not access portal modal:", err);
+    }
+
+    // 🧾 If not found, fallback to PDF extraction
+    console.log("🧾 Extracting from PDF...");
     const response = await fetch(tab.url);
     const buffer = await response.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
@@ -65,9 +95,10 @@ async function extractTextFromPdf(activeTab) {
     for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const content = await page.getTextContent();
-        const pageText = content.items.map(i => i.str).join(" ");
+        const pageText = content.items.map((i) => i.str).join(" ");
         text += `\n--- Page ${i} ---\n` + pageText;
     }
+
     return text;
 }
 
@@ -256,7 +287,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             }
 
             if (!text) {
-                text = await extractTextFromPdf(activeTab);
+                text = await extractTextFromPdfOrPortal(activeTab);
             }
 
             if (!events) {
@@ -268,7 +299,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             });
         } catch (storageErr) {
             console.warn("Session storage unavailable, falling back to fresh parse.", storageErr);
-            text = await extractTextFromPdf(activeTab);
+            text = await extractTextFromPdfOrPortal(activeTab);
             events = await extractEventsAI(text);
         }
         container.textContent = "";
