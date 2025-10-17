@@ -192,6 +192,28 @@ async function addEventToCalendar(ev) {
     });
 }
 
+function formatDate(dateStr) {
+    if (!dateStr) return "";
+
+    // Handle cases like "Every Tuesday", "Starting ..." — leave as-is
+    if (/[a-zA-Z]/.test(dateStr) && !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        return dateStr;
+    }
+
+    try {
+        const date = new Date(dateStr);
+        if (isNaN(date)) return dateStr;
+
+        const day = String(date.getDate()).padStart(2, "0");
+        const month = String(date.getMonth() + 1).padStart(2, "0");
+        const year = date.getFullYear();
+
+        return `${day}.${month}.${year}`;
+    } catch {
+        return dateStr;
+    }
+}
+
 // -------------------- Popup Rendering --------------------
 document.addEventListener("DOMContentLoaded", async () => {
     const container = document.getElementById("events");
@@ -267,12 +289,12 @@ document.addEventListener("DOMContentLoaded", async () => {
             const div = document.createElement("div");
             div.className = "event-item";
             div.innerHTML = `
-  <b>${ev.title}</b><br>
-  <p>${ev.description.slice(0, 120)}...</p><br>
-  🗓️ ${ev.date || ""}<br>
-  ⏰ ${ev.startTime || ""}${ev.endTime ? "–" + ev.endTime : ""}<br>
-  <button class="btn btn-primary add-btn" data-index="${idx}">Add to Calendar</button>
-`;
+              <b>${ev.title}</b><br>
+              <p>${ev.description.slice(0, 120)}...</p><br>
+              🗓️ ${formatDate(ev.date) || ""}<br>
+              ⏰ ${ev.startTime || ""}${ev.endTime ? "–" + ev.endTime : ""}<br>
+              <button class="btn btn-primary add-btn" data-index="${idx}">Add to Calendar</button>
+            `;
             // On click — scroll/highlight original text
             div.addEventListener("click", async () => {
                 const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
