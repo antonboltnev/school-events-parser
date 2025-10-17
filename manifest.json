@@ -23,7 +23,7 @@
     }
   },
   "oauth2": {
-    "client_id": "256462909058-8vtlu6mk89evvb3p4sqd6vh51vbm7g0l.apps.googleusercontent.com",
+    "client_id": "324500516835-qfhl9efj6kvkodg6qssl6louokkfm3sj.apps.googleusercontent.com",
     "scopes": ["https://www.googleapis.com/auth/calendar.events"]
   },
   "icons": {
