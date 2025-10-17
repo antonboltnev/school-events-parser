@@ -137,3 +137,7 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+popup/popup.js
+.idea/vcs.xml
+.idea/material_theme_project_new.xml
+.idea/workspace.xml

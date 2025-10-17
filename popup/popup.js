@@ -1,5 +1,88 @@
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("libs/pdf.worker.min.js");
 
+const textEncoder = new TextEncoder();
+
+function toHex(buffer) {
+    return Array.from(new Uint8Array(buffer))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+}
+
+async function hashValue(value) {
+    let data;
+    if (typeof value === "string") {
+        data = textEncoder.encode(value);
+    } else if (value instanceof ArrayBuffer) {
+        data = value;
+    } else if (ArrayBuffer.isView(value)) {
+        data = value.buffer;
+    } else if (value != null) {
+        data = textEncoder.encode(JSON.stringify(value));
+    } else {
+        data = textEncoder.encode("");
+    }
+
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    return toHex(hashBuffer);
+}
+
+function normalizePathname(pathname = "") {
+    if (!pathname) return "/";
+    const collapsed = pathname.replace(/\/+/g, "/");
+    if (collapsed.length > 1 && collapsed.endsWith("/")) {
+        return collapsed.slice(0, -1);
+    }
+    return collapsed || "/";
+}
+
+function buildFingerprint(urlStr, variant, signature) {
+    try {
+        const parsed = new URL(urlStr);
+        const normalizedPath = normalizePathname(parsed.pathname);
+        return `${parsed.origin}${normalizedPath}|${variant}|${signature}`;
+    } catch {
+        return `${urlStr}|${variant}|${signature}`;
+    }
+}
+
+function runtimeMessage(message) {
+    return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage(message, (response) => {
+            if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+                return;
+            }
+            resolve(response);
+        });
+    });
+}
+
+const cacheApi = {
+    async get(fingerprint) {
+        try {
+            const res = await runtimeMessage({ action: "cache:get", fingerprint });
+            return res?.entry || null;
+        } catch (err) {
+            console.warn("Cache lookup failed:", err);
+            return null;
+        }
+    },
+    async set(fingerprint, payload) {
+        try {
+            await runtimeMessage({ action: "cache:set", fingerprint, payload });
+        } catch (err) {
+            console.warn("Cache write failed:", err);
+        }
+    },
+    async clear(fingerprint) {
+        try {
+            await runtimeMessage({ action: "cache:clear", fingerprint });
+        } catch (err) {
+            console.warn("Cache clear failed:", err);
+        }
+    },
+};
+
 function normalizeDateRange(dateStr) {
     if (!dateStr) return dateStr;
 
@@ -79,7 +162,12 @@ async function extractTextFromPdfOrPortal(activeTab) {
 
         if (portalText && portalText.length > 100) { // avoid tiny elements
             console.log("✅ Extracted text from portal modal.");
-            return portalText;
+            const signature = await hashValue(`${tab.url}|portal|${portalText}`);
+            return {
+                text: portalText,
+                variant: "portal",
+                signature,
+            };
         }
     } catch (err) {
         console.warn("⚠️ Could not access portal modal:", err);
@@ -89,6 +177,17 @@ async function extractTextFromPdfOrPortal(activeTab) {
     console.log("🧾 Extracting from PDF...");
     const response = await fetch(tab.url);
     const buffer = await response.arrayBuffer();
+    const headerSeed = [
+        response.headers.get("etag"),
+        response.headers.get("last-modified"),
+        response.headers.get("content-length"),
+    ]
+        .filter(Boolean)
+        .join("|");
+    const signature = headerSeed
+        ? await hashValue(`${tab.url}|pdf|${headerSeed}`)
+        : await hashValue(buffer);
+
     const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
 
     let text = "";
@@ -99,7 +198,11 @@ async function extractTextFromPdfOrPortal(activeTab) {
         text += `\n--- Page ${i} ---\n` + pageText;
     }
 
-    return text;
+    return {
+        text,
+        variant: "pdf",
+        signature,
+    };
 }
 
 async function extractEventsAI(text) {
@@ -226,118 +329,78 @@ async function addEventToCalendar(ev) {
 function formatDate(dateStr) {
     if (!dateStr) return "";
 
-    // Handle cases like "Every Tuesday", "Starting ..." — leave as-is
-    if (/[a-zA-Z]/.test(dateStr) && !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-        return dateStr;
+    const candidates = [];
+    const normalized = normalizeDateRange(dateStr);
+    if (normalized) {
+        candidates.push(normalized);
+    }
+    if (!candidates.includes(dateStr)) {
+        candidates.push(dateStr);
     }
 
-    try {
-        const date = new Date(dateStr);
-        if (isNaN(date)) return dateStr;
-
-        const day = String(date.getDate()).padStart(2, "0");
-        const month = String(date.getMonth() + 1).padStart(2, "0");
-        const year = date.getFullYear();
-
-        return `${day}.${month}.${year}`;
-    } catch {
-        return dateStr;
+    for (const candidate of candidates) {
+        const parsed = new Date(candidate);
+        if (!isNaN(parsed)) {
+            const day = String(parsed.getDate()).padStart(2, "0");
+            const month = String(parsed.getMonth() + 1).padStart(2, "0");
+            const year = parsed.getFullYear();
+            return `${day}.${month}.${year}`;
+        }
     }
+
+    return dateStr;
 }
 
 // -------------------- Popup Rendering --------------------
 document.addEventListener("DOMContentLoaded", async () => {
     const container = document.getElementById("events");
-    const addAllBtn = document.getElementById("add-all");
+    const rescanBtn = document.getElementById("reparse");
 
-    addAllBtn.style.display = 'none';
+    let events = [];
+    let activeTab;
+    let tabUrl = "";
 
-    try {
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        const tabUrl = activeTab?.url || "";
+    const setScanningState = () => {
+        container.innerHTML = 'Scanning document. Bigger docs take more time.<span class="spinner spinner--primary" aria-hidden="true"></span>';
+    };
 
-        let isLisPortal = false;
-        try {
-            const { hostname } = new URL(tabUrl);
-            isLisPortal = hostname.includes("engage.lis.school");
-        } catch {
-            isLisPortal = tabUrl.includes("engage.lis.school");
-        }
+    const renderEvents = (list) => {
+        container.innerHTML = "";
 
-        if (!isLisPortal) {
-            container.textContent = "Only available on LIS school portal.";
-            return;
-        }
-
-        const cacheKey = `pdfData:${activeTab.id}`;
-        let text;
-        let events;
-        try {
-            const stored = await chrome.storage.session.get(cacheKey);
-            const cachedEntry = stored?.[cacheKey];
-
-            if (cachedEntry) {
-                if (typeof cachedEntry === "string") {
-                    // Legacy format from previous sessions
-                    text = cachedEntry;
-                } else if (cachedEntry.url === tabUrl) {
-                    text = cachedEntry.text;
-                    events = cachedEntry.events;
-                }
-            }
-
-            if (!text) {
-                text = await extractTextFromPdfOrPortal(activeTab);
-            }
-
-            if (!events) {
-                events = await extractEventsAI(text);
-            }
-
-            await chrome.storage.session.set({
-                [cacheKey]: { url: tabUrl, text, events }
-            });
-        } catch (storageErr) {
-            console.warn("Session storage unavailable, falling back to fresh parse.", storageErr);
-            text = await extractTextFromPdfOrPortal(activeTab);
-            events = await extractEventsAI(text);
-        }
-        container.textContent = "";
-
-
-        if (!events.length) {
+        if (!list.length) {
             container.textContent = "No events detected.";
-            addAllBtn.style.display = 'none';
+            rescanBtn.style.display = "none";
             return;
         }
 
-        // Enable after successful scan
-        addAllBtn.style.display = 'block';
-        addAllBtn.textContent = "Add All";
+        rescanBtn.style.display = "block";
 
-        // Render events
-        events.forEach((ev, idx) => {
+        list.forEach((ev, idx) => {
             const div = document.createElement("div");
             div.className = "event-item";
+            const desc = (ev.description || "").slice(0, 120);
+            const hasMoreDesc = (ev.description || "").length > 120;
+            const descriptionMarkup = desc ? `<p>${desc}${hasMoreDesc ? "..." : ""}</p><br>` : "";
+            const range = ev.endTime ? `${ev.startTime || ""}–${ev.endTime}` : ev.startTime || "";
+            const timeMarkup = range ? `⏰ ${range}<br>` : "";
+
             div.innerHTML = `
-              <b>${ev.title}</b><br>
-              <p>${ev.description.slice(0, 120)}...</p><br>
+              <b>${ev.title || "Untitled Event"}</b><br>
+              ${descriptionMarkup}
               🗓️ ${formatDate(ev.date) || ""}<br>
-              ⏰ ${ev.startTime || ""}${ev.endTime ? "–" + ev.endTime : ""}<br>
+              ${timeMarkup}
               <button class="btn btn-primary add-btn" data-index="${idx}">Add to Calendar</button>
             `;
-            // On click — scroll/highlight original text
+
             div.addEventListener("click", async () => {
                 const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-                // Ignore Chrome-internal or extension pages
-                if (!tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("chrome-extension://")) {
+                if (!tab?.url || tab.url.startsWith("chrome://") || tab.url.startsWith("chrome-extension://")) {
                     console.warn("Cannot inject into this page type.");
                     return;
                 }
 
                 try {
-                    // Ensure scripting API is available
                     if (!chrome.scripting) {
                         console.error("Scripting API not available");
                         return;
@@ -345,22 +408,25 @@ document.addEventListener("DOMContentLoaded", async () => {
 
                     await chrome.scripting.executeScript({
                         target: { tabId: tab.id },
-                        files: ["content.js"]
+                        files: ["content.js"],
                     });
 
-                    chrome.tabs.sendMessage(tab.id, {
-                        action: "highlightText",
-                        text: ev.raw.slice(0, 50)
-                    });
+                    const highlightCandidate = (ev.raw || ev.description || ev.title || "").slice(0, 80);
+                    if (highlightCandidate) {
+                        chrome.tabs.sendMessage(tab.id, {
+                            action: "highlightText",
+                            text: highlightCandidate,
+                        });
+                    }
                 } catch (err) {
                     console.error("Could not inject content script:", err);
                 }
             });
+
             container.appendChild(div);
         });
 
-        // Handle individual "Add to Calendar" buttons
-        document.querySelectorAll(".add-btn").forEach((btn) => {
+        container.querySelectorAll(".add-btn").forEach((btn) => {
             btn.addEventListener("click", async (e) => {
                 e.stopPropagation();
                 btn.disabled = true;
@@ -375,16 +441,71 @@ document.addEventListener("DOMContentLoaded", async () => {
                 }
             });
         });
+    };
 
-        // Handle "Add All" button
-        addAllBtn.addEventListener("click", async () => {
-            addAllBtn.disabled = true;
-            addAllBtn.innerHTML = 'Adding all... <span class="spinner"></span>';
-            for (const ev of events) await addEventToCalendar(ev);
-            addAllBtn.innerHTML = "✅ All Added!";
-        });
+    const runExtraction = async ({ forceFresh = false } = {}) => {
+        setScanningState();
+        rescanBtn.disabled = true;
+        rescanBtn.textContent = forceFresh ? "Rescanning..." : "Rescan & Refresh";
+
+        try {
+            const { text, variant, signature } = await extractTextFromPdfOrPortal(activeTab);
+            const fingerprint = buildFingerprint(tabUrl, variant, signature);
+
+            if (forceFresh) {
+                await cacheApi.clear(fingerprint);
+            }
+
+            let cached = forceFresh ? null : await cacheApi.get(fingerprint);
+            let parsedText = text;
+            let parsedEvents = cached?.events;
+
+            if (!parsedEvents) {
+                parsedEvents = await extractEventsAI(parsedText);
+                await cacheApi.set(fingerprint, { text: parsedText, events: parsedEvents });
+            } else if (cached?.text) {
+                parsedText = cached.text;
+            }
+
+            events = Array.isArray(parsedEvents) ? parsedEvents : [];
+            renderEvents(events);
+        } catch (err) {
+            console.error(err);
+            container.textContent = "❌ Unable to read document.";
+            rescanBtn.style.display = "none";
+        } finally {
+            rescanBtn.disabled = false;
+            rescanBtn.textContent = "Rescan & Refresh";
+        }
+    };
+
+    try {
+        [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabUrl = activeTab?.url || "";
     } catch (err) {
-        container.textContent = "❌ Unable to read document.";
-        console.error(err);
+        console.error("Unable to determine active tab:", err);
+        container.textContent = "❌ Unable to determine active tab.";
+        rescanBtn.disabled = true;
+        return;
     }
+
+    let isLisPortal = false;
+    try {
+        const { hostname } = new URL(tabUrl);
+        isLisPortal = hostname.includes("engage.lis.school");
+    } catch {
+        isLisPortal = tabUrl.includes("engage.lis.school");
+    }
+
+    if (!isLisPortal) {
+        container.textContent = "Only available on LIS school portal.";
+        rescanBtn.disabled = true;
+        return;
+    }
+
+    rescanBtn.addEventListener("click", async () => {
+        await runExtraction({ forceFresh: true });
+    });
+
+    await runExtraction();
 });
